@@ -11,6 +11,12 @@ the scheduled scan to act on:
 
 Usage:
   python3 job_radar_fetch.py --db-dir <dir with ArtifactData out_dir JSON files> --out <dir>
+  python3 job_radar_fetch.py --snapshot snapshot.json [--prev old_snapshot.json]
+
+--snapshot needs no stored jobs, watchlist or registry. It writes every open job from
+the built-in sources that passes the location and title filters (senior roles kept),
+plus the list of all open URLs and which job systems were read successfully. It is
+meant to run on a schedule (GitHub Actions) and publish plain data for the scan.
 """
 import argparse, concurrent.futures as cf, datetime as dt, glob, hashlib, html, json, os, re, sys, time
 import urllib.parse
@@ -844,13 +850,19 @@ def recheck(stored, fetched_by_url, fetched_ids, fetched_pairs):
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db-dir", required=True)
+    ap.add_argument("--db-dir")
+    ap.add_argument("--snapshot", help="Write a public snapshot of open jobs to this file (no private inputs) and exit")
+    ap.add_argument("--prev", help="Previous snapshot; descriptions of unchanged jobs are reused")
     ap.add_argument("--out", default=".")
     ap.add_argument("--no-details", action="store_true")
     ap.add_argument("--companies", help="JSON file: ArtifactData out_dir file of config/companies")
     ap.add_argument("--detect", nargs="+", help="Detect careers page and job system for these websites, print JSON, and exit")
     ap.add_argument("--watchlist", help="JSON file of target companies: {\"companies\": [{\"name\": ...}]}")
     a = ap.parse_args()
+    if a.snapshot:
+        return snapshot_main(a)
+    if not a.db_dir:
+        ap.error("--db-dir is required unless --snapshot is used")
     if a.watchlist:
         load_watchlist(a.watchlist)
     if not TARGET_KEYS:
@@ -941,6 +953,96 @@ def main():
                "recheck": {v: sum(1 for x in verdicts if x["verdict"] == v) for v in ("open", "closed", "unknown")}},
               open(os.path.join(a.out, "sources.json"), "w"), indent=1)
     print(json.dumps(json.load(open(os.path.join(a.out, "sources.json"))), indent=1))
+
+
+# ---------------------------------------------------------------- public snapshot
+# Text in a job link -> source that lists every open job on that host. When that source was read
+# successfully today and a stored job on the host is not in the snapshot, the job has closed.
+CLOSED_IF_MISSING = [
+    ("jobs.porsche.com", "Porsche Engineering + MHP (jobs.porsche.com)"),
+    ("careers.nttdata.ro", "NTT DATA + BMW TechWorks (SuccessFactors)"),
+    ("careers-arobs.icims.com", "AROBS (iCIMS)"),
+    ("careers.marsh.com", "Marsh McLennan (Phenom)"),
+    ("jobs.smartrecruiters.com/BoschGroup", "Bosch (SmartRecruiters)"),
+    ("analogdevices.wd1.myworkdayjobs.com", "Analog Devices (Workday)"),
+    ("ing.wd3.myworkdayjobs.com", "ING Hubs (Workday)"),
+    ("pwc.wd3.myworkdayjobs.com", "PwC (Workday)"),
+    ("hdjq.fa.us2.oraclecloud.com", "Emerson (Oracle)"),
+    ("egup.fa.us2.oraclecloud.com", "Vertiv (Oracle)"),
+    ("mindsoft.ro", "Mindsoft"),
+]
+
+
+def snapshot_main(a):
+    TARGET_KEYS.update(k for _, k, _ in COMPANY_KEYS)
+    prev = {}
+    if a.prev and os.path.exists(a.prev):
+        try:
+            prev = {j["url"]: j for j in json.load(open(a.prev)).get("jobs", []) if j.get("url") and j.get("desc")}
+        except Exception as e:
+            print(f"previous snapshot not loaded: {e}", file=sys.stderr)
+
+    sources, fetched = {}, []
+    for name, fn in SOURCES:
+        t0 = time.time()
+        try:
+            items = fn()
+            sources[name] = {"ok": True, "count": len(items), "secs": round(time.time() - t0, 1)}
+            fetched += items
+        except Exception as e:
+            sources[name] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"}
+
+    jobs, seen, skipped = [], set(), {"location": 0, "title": 0, "stale": 0, "duplicate": 0}
+    for j in fetched:
+        if not j.get("region"):
+            skipped["location"] += 1
+            continue
+        if EXCLUDE_TITLE.search(j["title"]) or not TECH_TITLE.search(j["title"]) or \
+                (j["region"] != "Cluj" and JUNK_REMOTE.search(j["title"])):
+            skipped["title"] += 1
+            continue
+        pd = parse_date(j.get("posted")) if j.get("posted") else None
+        if pd and (TODAY - pd).days > MAX_AGE_DAYS and j["source"] in ("Hipo", "Himalayas (remote)"):
+            skipped["stale"] += 1
+            continue
+        pk = pair_key(j["company"], j["title"])
+        if pk in seen:
+            skipped["duplicate"] += 1
+            continue
+        seen.add(pk)
+        j["id"] = f"{company_key(j['company'])}__{slug(j['title'])}__{'cluj' if j['region'] == 'Cluj' else 'remote'}"[:150]
+        j["pairKey"] = pk
+        j["senior"] = bool(SENIOR_TITLE.search(j["title"]) or re.search(r"senior|manager|director|lead|executive", j.get("seniorityTag") or "", re.I))
+        old = prev.get(j.get("url"))
+        if old and not j.get("desc"):
+            j["desc"] = old["desc"]
+        jobs.append(j)
+
+    if not a.no_details:
+        with cf.ThreadPoolExecutor(8) as ex:
+            jobs = list(ex.map(fetch_detail, jobs))
+    for j in jobs:
+        j.update(flags((j.get("title") or "") + "\n" + (j.get("desc") or "")))
+        j.pop("_detail", None)
+        j.pop("companyRaw", None)
+        if j.get("desc"):
+            j["desc"] = j["desc"][:1800]
+
+    ok = {n for n, v in sources.items() if v.get("ok")}
+    out = {
+        "date": TODAY.isoformat(),
+        "generatedAt": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "sources": sources,
+        "closedIfMissing": [h for h, n in CLOSED_IF_MISSING if n in ok],
+        "openUrls": sorted({j["url"] for j in fetched if j.get("url")}),
+        "skipped": skipped,
+        "jobs": jobs,
+    }
+    tmp = a.snapshot + ".tmp"
+    json.dump(out, open(tmp, "w"), ensure_ascii=False, indent=1)
+    os.replace(tmp, a.snapshot)
+    print(json.dumps({"date": out["date"], "jobs": len(jobs), "openUrls": len(out["openUrls"]),
+                      "sourcesOk": len(ok), "sourcesFailed": [n for n in sources if n not in ok], "skipped": skipped}, indent=1))
 
 
 if __name__ == "__main__":
