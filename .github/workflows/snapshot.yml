@@ -1,0 +1,46 @@
+name: Job snapshot
+ 
+# Runs the fetcher on GitHub's servers every morning and publishes plain job data
+# (snapshot.json) on the "data" branch. The Job Radar scan only downloads that file;
+# it never runs code from this repo.
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 03:17 UTC = 06:17 in Romania (05:17 in winter); the scan runs at 07:57
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["job_radar_fetch.py", ".github/workflows/snapshot.yml"]
+ 
+permissions:
+  contents: write
+ 
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+ 
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q requests
+      - name: Previous snapshot (to reuse job descriptions)
+        run: curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/snapshot.json" -o prev.json || echo "no previous snapshot"
+      - name: Build snapshot
+        run: |
+          mkdir -p out
+          python3 job_radar_fetch.py --snapshot out/snapshot.json --prev prev.json
+      - name: Publish to the data branch
+        run: |
+          cd out
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add snapshot.json
+          git commit -q -m "Snapshot $(date -u +%F)"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" data
+ 
