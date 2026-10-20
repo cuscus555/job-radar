@@ -1,3 +1,4 @@
+
 name: Job snapshot
  
 # Runs the fetcher on GitHub's servers every morning and publishes plain job data
@@ -5,7 +6,10 @@ name: Job snapshot
 # it never runs code from this repo.
 on:
   schedule:
-    - cron: "17 3 * * *"   # 03:17 UTC = 06:17 in Romania (05:17 in winter); the scan runs at 07:57
+    # GitHub often starts scheduled runs late, so there are two: 00:17 and 06:17 Romanian summer time.
+    # The 07:57 scan accepts data from the previous day, so the overnight run is enough on its own.
+    - cron: "17 21 * * *"
+    - cron: "17 3 * * *"
   workflow_dispatch:
   push:
     branches: [main]
