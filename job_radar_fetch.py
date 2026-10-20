@@ -50,7 +50,16 @@ JUNK_REMOTE = re.compile(r"future position|talent pool|copy of|ai trainer|code r
                          r"\bcontract\b|part[- ]time|commission|unpaid|volunteer|ios developer|android developer|unity|game", re.I)
 TECH_TITLE = re.compile(r"embedded|firmware|fpga|asic|hardware|electronic|test|qa\b|quality|validation|verification|devops|\bsre\b|reliability|"
                         r"cloud|infrastructure|platform|network|security|cyber|software|developer|programmer|engineer|full[- ]?stack|back[- ]?end|"
-                        r"front[- ]?end|python|c\+\+|\bc#|java|data|integration|automation|scada|plc|robot|\bml\b|\bai\b|machine learning|linux|systems", re.I)
+                        r"front[- ]?end|python|c\+\+|\bc#|java|data|integration|automation|scada|plc|robot|\bml\b|\bai\b|machine learning|linux|systems|"
+                        r"application|administrat|\badmin\b|sysadmin|threat|\bsoc\b|\biam\b|identity|architect|autosar|aurosar|technolog|telecom|"
+                        r"re[tț]e(a|le)?\b|electronist|(technical|tech|it|application|app|production|product|desktop|2nd[- ]level|second[- ]level|l[123]) support|"
+                        r"support (engineer|analyst|specialist)", re.I)
+# "IT" as a word, matched case-sensitively so the English word "it" does not count
+IT_TITLE = re.compile(r"\bIT\b")
+
+
+def is_tech(title):
+    return bool(TECH_TITLE.search(title or "") or IT_TITLE.search(title or ""))
 
 COMPANY_KEYS = [
     (r"analog devices|\badi\b", "analog-devices", "Analog Devices (ADI)"),
@@ -909,7 +918,7 @@ def main():
         if not j.get("region"):
             skipped["location"] += 1
             continue
-        if EXCLUDE_TITLE.search(j["title"]) or not TECH_TITLE.search(j["title"]) or \
+        if EXCLUDE_TITLE.search(j["title"]) or not is_tech(j["title"]) or \
                 (j["region"] != "Cluj" and JUNK_REMOTE.search(j["title"])):
             skipped["title"] += 1
             continue
@@ -997,7 +1006,7 @@ def snapshot_main(a):
         if not j.get("region"):
             skipped["location"] += 1
             continue
-        if EXCLUDE_TITLE.search(j["title"]) or not TECH_TITLE.search(j["title"]) or \
+        if EXCLUDE_TITLE.search(j["title"]) or not is_tech(j["title"]) or \
                 (j["region"] != "Cluj" and JUNK_REMOTE.search(j["title"])):
             skipped["title"] += 1
             continue
